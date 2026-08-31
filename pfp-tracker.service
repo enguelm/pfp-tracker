@@ -1,0 +1,11 @@
+[Unit]
+Description=PFP tracker - releve nav vers Supabase
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+EnvironmentFile=/home/pi/pfp-tracker/config.env
+ExecStart=/usr/bin/python3 /home/pi/pfp-tracker/tracker.py
+TimeoutStartSec=180
