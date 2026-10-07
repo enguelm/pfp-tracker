@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=pi
-EnvironmentFile=/home/pi/pfp-tracker/config.env
-ExecStart=/usr/bin/python3 /home/pi/pfp-tracker/tracker.py
-TimeoutStartSec=180
+User=@USER@
+EnvironmentFile=@HOME@/pfp-tracker/config.env
+ExecStart=/usr/bin/python3 @HOME@/pfp-tracker/tracker.py
+TimeoutStartSec=240

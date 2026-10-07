@@ -2,7 +2,7 @@
 Description=Lance le PFP tracker toutes les 30 minutes
 
 [Timer]
-OnBootSec=2min
+OnBootSec=3min
 OnUnitActiveSec=30min
 RandomizedDelaySec=30
 Persistent=true
