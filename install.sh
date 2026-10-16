@@ -43,7 +43,9 @@ sed -e "s|@USER@|$USER_NAME|g" -e "s|@HOME@|$HOME_DIR|g" "$HERE/pfp-tracker.serv
   | sudo tee /etc/systemd/system/pfp-tracker.service >/dev/null
 sudo install -m 644 "$HERE/pfp-tracker.timer" /etc/systemd/system/pfp-tracker.timer
 sudo systemctl daemon-reload
-sudo systemctl enable --now pfp-tracker.timer
+sudo systemctl enable pfp-tracker.timer
+# restart (et non --now) : un timer déjà actif ne reprend sinon pas un nouvel intervalle.
+sudo systemctl restart pfp-tracker.timer
 
 echo "==> Heure : fuseau UTC et synchro NTP (le Pi n'a pas d'horloge sauvegardée)"
 sudo timedatectl set-timezone UTC

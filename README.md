@@ -1,7 +1,7 @@
 # PFP tracker — Raspberry Pi du bord
 
 Relevé de navigation (position, vitesse fond, cap, vent vrai) depuis le réseau
-NMEA 2000 du bateau vers le site, via Starlink. Toutes les 30 minutes, un point
+NMEA 2000 du bateau vers le site, via Starlink. Toutes les heures, un point
 part vers l'Edge Function Supabase `ingest-position` ; le site l'affiche sur la
 page « Le direct » (`/direct`). Tant qu'aucun relevé n'existe, le site montre le
 bateau au port de Papeete avec les données nav en tirets.
@@ -35,7 +35,7 @@ Raymarine (iTC-5, AIS700, EV-1) ── NMEA 2000 ── YDEN-03N ── Ethernet
 
 ### Robustesse
 
-- **Coupure Starlink** : les points s'accumulent (~100 jours de marge) et
+- **Coupure Starlink** : les points s'accumulent (~200 jours de marge) et
   repartent au retour du lien. Ingestion idempotente (upsert sur `ts`).
 - **Pas d'horloge sur le Pi** : les points sont horodatés avec l'heure GPS du
   flux NMEA. Sans heure GPS et sans synchro NTP, pas de point.
@@ -53,7 +53,7 @@ Raymarine (iTC-5, AIS700, EV-1) ── NMEA 2000 ── YDEN-03N ── Ethernet
 - **Base SQLite corrompue** (coupure de courant) : mise de côté
   (`queue.db.corrompu-…`) et recréée au passage suivant.
 - **Relevé qui plante** : la file est quand même envoyée, et le timer relance
-  un passage 30 min plus tard quoi qu'il arrive.
+  un passage une heure plus tard quoi qu'il arrive.
 
 ## Fichiers
 

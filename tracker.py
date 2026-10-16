@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PFP tracker — relevé de navigation du bord vers le site.
 
-Lancé toutes les 30 min par un timer systemd (process oneshot, ~70 s de vie) :
+Lancé toutes les heures par un timer systemd (process oneshot, ~70 s de vie) :
   1. écoute le flux NMEA 0183 de la passerelle Yacht Devices (YDEN-03,
      TCP 1456, réglages usine) pendant SAMPLE_WINDOW_S secondes. La passerelle
      calcule elle-même le vent vrai (phrase MWD) et fournit l'heure GPS (RMC) ;
@@ -49,7 +49,7 @@ MAX_AGE_S = float(os.environ.get("MAX_AGE_S", "60"))  # fraîcheur exigée (Sign
 SUPABASE_FUNCTION_URL = os.environ.get("SUPABASE_FUNCTION_URL", "")
 TRACKER_TOKEN = os.environ.get("TRACKER_TOKEN", "")
 QUEUE_DB = os.path.expanduser(os.environ.get("QUEUE_DB", "~/pfp-tracker/queue.db"))
-QUEUE_MAX_ROWS = 5000  # ~100 jours de coupure à un point / 30 min
+QUEUE_MAX_ROWS = 5000  # ~200 jours de coupure à un point par heure
 BATCH_SIZE = 100
 HTTP_TIMEOUT_S = 30
 MIN_COG_SOG_KN = 0.5  # en dessous, le cap fond est du bruit
