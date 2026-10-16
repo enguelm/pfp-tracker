@@ -2,9 +2,13 @@
 
 import json
 import os
+import socket
 import sqlite3
+import struct
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 
@@ -258,6 +262,110 @@ class Queue(unittest.TestCase):
         self.assertEqual(tracker.queue_size(self.db), 5)
         oldest = self.db.execute("select min(ts) from queue").fetchone()[0]
         self.assertEqual(oldest, "2026-11-15T03:00:00Z")
+
+
+class FakeGateway:
+    """Serveur TCP local qui envoie des lignes puis, si demandé, coupe brutalement."""
+
+    def __init__(self, lines, reset_after=None):
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen()
+        self.port = self.srv.getsockname()[1]
+        self.lines, self.reset_after = lines, reset_after
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        try:
+            conn, _ = self.srv.accept()
+        except OSError:
+            return
+        for line in self.lines:
+            conn.sendall((line + "\r\n").encode())
+        if self.reset_after is not None:
+            time.sleep(self.reset_after)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()
+
+    def close(self):
+        self.srv.close()
+
+
+class Robustness(unittest.TestCase):
+    RMC = nmea("YDRMC,120530.50,A,1732.1000,S,14934.0620,W,6.4,312.0,151126,12.5,E,A")
+
+    def test_nan_and_inf_are_rejected(self):
+        self.assertIsNone(tracker.nmea_float("nan"))
+        self.assertIsNone(tracker.nmea_float("inf"))
+        self.assertIsNone(tracker.nmea_float("1e400"))
+        self.assertEqual(tracker.nmea_float("12.5"), 12.5)
+
+    def test_corrupted_values_do_not_pollute_angles(self):
+        s = tracker.Samples()
+        for body in ("YDRMC,120000.00,A,1732.1000,S,14934.0620,W,6.4,312.0,151126,,,A",
+                     "YDHDG,nan,,,12.0,E", "YDHDG,1e400,,,12.0,E", "YDHDG,300.0,,,12.0,E",
+                     "YDMWD,nan,T,,M,inf,N,,M", "YDMWD,85.0,T,,M,14.2,N,,M"):
+            tracker.feed_nmea(s, tracker.nmea_fields(nmea(body)))
+        point = tracker.aggregate(s)
+        self.assertEqual(point["heading_deg"], 312.0)
+        self.assertEqual(point["twd_deg"], 85.0)
+        self.assertEqual(point["tws_kn"], 14.2)
+
+    def test_connection_reset_keeps_received_data(self):
+        gw = FakeGateway([self.RMC] * 3, reset_after=0.2)
+        try:
+            samples = tracker.sample_nmea("127.0.0.1", gw.port, 1.5)
+        finally:
+            gw.close()
+        self.assertIsNotNone(samples)
+        self.assertTrue(samples.has_fix())
+        self.assertIsNotNone(tracker.aggregate(samples))
+
+    def test_unreachable_gateway_returns_none(self):
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+        free.close()  # port libre : connexion refusée
+        self.assertIsNone(tracker.sample_nmea("127.0.0.1", port, 1))
+
+    def test_falls_back_to_next_gateway_address(self):
+        gw = FakeGateway([self.RMC])
+        try:
+            samples = tracker.sample_gateway(["adresse-inexistante.invalid", "127.0.0.1"], gw.port, 1)
+        finally:
+            gw.close()
+        self.assertTrue(samples.has_fix())
+
+    def test_corrupted_queue_is_set_aside(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "queue.db")
+            with open(path, "wb") as f:
+                f.write(b"pas une base sqlite" * 300)
+            db = tracker.open_queue(path)
+            tracker.enqueue(db, {"ts": "2026-11-15T00:00:00Z", "lat": -17.5, "lon": -149.5})
+            self.assertEqual(tracker.queue_size(db), 1)
+            self.assertEqual(len([n for n in os.listdir(tmp) if ".corrompu-" in n]), 1)
+
+    def test_sampling_crash_still_flushes_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "queue.db")
+            tracker.enqueue(tracker.open_queue(path), {"ts": "2026-11-15T00:00:00Z", "lat": -17.5, "lon": -149.5})
+            sent = []
+            saved = (tracker.collect_point, tracker.send_batch, tracker.QUEUE_DB,
+                     tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN)
+
+            def boom(window_s):
+                raise RuntimeError("panne simulée")
+
+            tracker.collect_point = boom
+            tracker.send_batch = lambda points: sent.append(points) or "ok"
+            tracker.QUEUE_DB, tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN = path, "http://x", "t"
+            try:
+                self.assertEqual(tracker.main(["--window", "1"]), 0)
+            finally:
+                (tracker.collect_point, tracker.send_batch, tracker.QUEUE_DB,
+                 tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN) = saved
+            self.assertEqual(len(sent), 1)
 
 
 if __name__ == "__main__":

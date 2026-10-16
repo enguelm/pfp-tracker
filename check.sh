@@ -17,10 +17,19 @@ ko()   { printf '  \033[31mKO\033[0m   %s\n' "$*"; }
 info() { printf '  --   %s\n' "$*"; }
 
 echo "== Réseau"
-GW_IP="$(getent ahostsv4 "$NMEA_TCP_HOST" 2>/dev/null | awk 'NR==1{print $1}')"
-if [[ -n "$GW_IP" ]]; then ok "passerelle $NMEA_TCP_HOST → $GW_IP"; else ko "passerelle $NMEA_TCP_HOST introuvable (mDNS ? mettre l'IP dans config.env)"; fi
-if [[ -n "$GW_IP" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_PORT" 2>/dev/null; then
-  ok "port TCP $NMEA_TCP_PORT ouvert sur la passerelle"
+# NMEA_TCP_HOST peut lister plusieurs adresses (« IP,yden.local ») : comme le tracker, on garde la première qui répond.
+GW_IP=""
+IFS=',' read -ra GW_HOSTS <<< "$NMEA_TCP_HOST"
+for host in "${GW_HOSTS[@]}"; do
+  host="${host// /}"
+  ip="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [[ -z "$ip" ]]; then ko "passerelle $host introuvable (mDNS ? mettre l'IP dans config.env)"; continue; fi
+  if timeout 5 bash -c "exec 3<>/dev/tcp/$ip/$NMEA_TCP_PORT" 2>/dev/null; then
+    ok "passerelle $host → $ip, port TCP $NMEA_TCP_PORT ouvert"; GW_IP="$ip"; break
+  fi
+  ko "passerelle $host → $ip, port TCP $NMEA_TCP_PORT fermé ou hors ligne"
+done
+if [[ -n "$GW_IP" ]]; then
   info "5 premières phrases NMEA :"
   timeout 8 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_PORT; head -n 5 <&3" 2>/dev/null | sed 's/^/         /' || info "(rien reçu : instruments éteints ou serveur n°1 désactivé)"
   # Types de phrases sur 15 s : la position exige RMC (PGN 129029 sur le bus) ou, à défaut, GLL.
@@ -35,7 +44,7 @@ if [[ -n "$GW_IP" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_POR
   elif [[ "$TYPES" == *"HDG:"* || "$TYPES" == *"HDM:"* ]]; then info "cap compas reçu (HDG/HDM) : heading_deg n'apparaît dans --sample que si la déclinaison est sur le bus"
   else info "pas de cap (pilote / EV-1 éteint ?) : direction du vent publiée seulement au-delà de 2 nœuds"; fi
 else
-  ko "port TCP $NMEA_TCP_PORT fermé ou passerelle hors ligne"
+  ko "aucune passerelle joignable ($NMEA_TCP_HOST, port $NMEA_TCP_PORT)"
 fi
 # Sans -f : n'importe quelle réponse HTTP prouve l'accès Internet (la racine Supabase répond 404).
 if curl -sS -m 8 -o /dev/null https://uiblqthfbysfxjalwdzw.supabase.co/ 2>/dev/null; then ok "Internet (Starlink) joignable"; else ko "pas d'Internet (Starlink éteint ? WAN du RUTM10 ?) — les points s'accumuleront dans la file"; fi

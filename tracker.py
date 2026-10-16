@@ -39,7 +39,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 # --- Configuration (surchargée par l'environnement, cf. config.example.env) ---
-NMEA_TCP_HOST = os.environ.get("NMEA_TCP_HOST", "yden.local")
+# Une ou plusieurs adresses séparées par des virgules, essayées dans l'ordre
+# (ex. « 192.168.10.20,yden.local » : l'IP fixe, puis mDNS si l'IP a changé).
+NMEA_TCP_HOSTS = [h.strip() for h in os.environ.get("NMEA_TCP_HOST", "yden.local").split(",") if h.strip()]
 NMEA_TCP_PORT = int(os.environ.get("NMEA_TCP_PORT", "1456"))
 SIGNALK_URL = os.environ.get("SIGNALK_URL", "").rstrip("/")  # vide = désactivé
 SAMPLE_WINDOW_S = float(os.environ.get("SAMPLE_WINDOW_S", "60"))
@@ -137,9 +139,12 @@ def nmea_fields(line: str) -> Optional[List[str]]:
 
 def nmea_float(value: str) -> Optional[float]:
     try:
-        return float(value) if value else None
+        number = float(value) if value else None
     except ValueError:
         return None
+    # float() accepte « nan » et « inf » : une moyenne d'angles avec un NaN
+    # vaudrait 0,0° sans erreur, d'où le filtre.
+    return number if number is not None and math.isfinite(number) else None
 
 
 def nmea_coord(value: str, hemisphere: str) -> Optional[float]:
@@ -222,33 +227,66 @@ def feed_nmea(samples: Samples, fields: List[str]) -> None:
         samples.compass |= nmea_float(f[1]) is not None
 
 
+def _read_stream(sock: socket.socket, samples: Samples, deadline: float) -> None:
+    """Lit le flux jusqu'à l'échéance ou la coupure, sans jamais lever."""
+    sock.settimeout(5)
+    buf = b""
+    while time.monotonic() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            continue
+        except OSError as exc:
+            log(f"nmea: connexion coupée en cours d'écoute ({exc})")
+            return
+        if not chunk:
+            log("nmea: connexion fermée par la passerelle")
+            return
+        *lines, buf = (buf + chunk).split(b"\n")
+        buf = buf[-4096:]  # flux sans saut de ligne : pas de croissance sans fin
+        for line in lines:
+            fields = nmea_fields(line.decode("ascii", "ignore"))
+            if not fields:
+                continue
+            try:
+                feed_nmea(samples, fields)
+            except Exception as exc:  # noqa: BLE001 — une phrase inattendue ne doit pas perdre la fenêtre
+                log(f"nmea: phrase ignorée ({exc!r}) : {line[:80]!r}")
+
+
 def sample_nmea(host: str, port: int, window_s: float) -> Optional[Samples]:
-    """Écoute la passerelle pendant window_s secondes. None si injoignable."""
+    """Écoute la passerelle pendant window_s secondes. None si injoignable.
+
+    Une coupure en cours d'écoute garde ce qui a déjà été reçu et tente de se
+    reconnecter jusqu'à l'échéance."""
     samples = Samples()
     deadline = time.monotonic() + window_s
-    try:
-        with socket.create_connection((host, port), timeout=10) as sock:
-            sock.settimeout(5)
-            buf = b""
-            while time.monotonic() < deadline:
-                try:
-                    chunk = sock.recv(4096)
-                except socket.timeout:
-                    continue
-                if not chunk:
-                    log("nmea: connexion fermée par la passerelle")
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    fields = nmea_fields(line.decode("ascii", "ignore"))
-                    if fields:
-                        feed_nmea(samples, fields)
-    except OSError as exc:
-        log(f"nmea: passerelle {host}:{port} injoignable ({exc})")
-        return None
-    log(f"nmea: {samples.sentences} phrases reçues en {window_s:.0f} s")
+    connected = False
+    while time.monotonic() < deadline:
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+        except OSError as exc:
+            if not connected:
+                log(f"nmea: passerelle {host}:{port} injoignable ({exc})")
+                return None
+            log(f"nmea: reconnexion impossible ({exc})")
+            break
+        connected = True
+        with sock:
+            _read_stream(sock, samples, deadline)
+        if time.monotonic() < deadline:
+            time.sleep(2)
+    log(f"nmea: {samples.sentences} phrases reçues en {window_s:.0f} s ({host})")
     return samples
+
+
+def sample_gateway(hosts: List[str], port: int, window_s: float) -> Optional[Samples]:
+    """Première adresse joignable de la liste. None si aucune ne répond."""
+    for host in hosts:
+        samples = sample_nmea(host, port, window_s)
+        if samples is not None:
+            return samples
+    return None
 
 
 # --- Signal K (optionnel) ---------------------------------------------------
@@ -304,7 +342,8 @@ def feed_signalk(samples: Samples, tree: dict) -> None:
 
     def num(*path):
         value = signalk_value(tree, *path)
-        return float(value) if isinstance(value, (int, float)) else None
+        ok = isinstance(value, (int, float)) and math.isfinite(value)
+        return float(value) if ok else None
 
     sog = num("navigation", "speedOverGround")
     variation = num("navigation", "magneticVariation") or 0.0
@@ -411,11 +450,29 @@ def aggregate(samples: Optional[Samples]) -> Optional[dict]:
 
 # --- File locale ------------------------------------------------------------
 
-def open_queue(path: str = QUEUE_DB) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def _connect_queue(path: str) -> sqlite3.Connection:
     db = sqlite3.connect(path)
-    db.execute("create table if not exists queue (ts text primary key, payload text not null)")
+    try:
+        db.execute("create table if not exists queue (ts text primary key, payload text not null)")
+        if db.execute("pragma quick_check").fetchone()[0] != "ok":
+            raise sqlite3.DatabaseError("quick_check en échec")
+    except sqlite3.DatabaseError:
+        db.close()
+        raise
     return db
+
+
+def open_queue(path: str = QUEUE_DB) -> sqlite3.Connection:
+    """Ouvre la file ; une base corrompue (coupure de courant, carte SD) est
+    mise de côté et remplacée, sinon chaque passage planterait à vie."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        return _connect_queue(path)
+    except sqlite3.DatabaseError as exc:
+        broken = f"{path}.corrompu-{int(time.time())}"
+        log(f"file locale illisible ({exc}) : mise de côté dans {broken}, nouvelle file")
+        os.replace(path, broken)
+        return _connect_queue(path)
 
 
 def enqueue(db: sqlite3.Connection, point: dict) -> None:
@@ -494,6 +551,20 @@ def flush_queue(db: sqlite3.Connection) -> None:
 
 # --- Programme principal ----------------------------------------------------
 
+def collect_point(window_s: float) -> Optional[dict]:
+    samples = sample_gateway(NMEA_TCP_HOSTS, NMEA_TCP_PORT, window_s)
+    if samples is None and SIGNALK_URL:
+        samples = sample_signalk(SIGNALK_URL, window_s)
+    point = aggregate(samples)
+    if point:
+        log("point: " + json.dumps(point, ensure_ascii=False))
+    elif samples is None:
+        log("aucune source de données joignable — pas de point ce passage")
+    elif not samples.has_fix():
+        log("aucune position GPS reçue (instruments éteints ?) — pas de point")
+    return point
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="PFP tracker — relevé nav → Supabase")
     parser.add_argument("--dry-run", action="store_true", help="échantillonne et affiche le point, sans file ni envoi")
@@ -503,21 +574,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     point = None
     if not args.flush_only:
-        samples = sample_nmea(NMEA_TCP_HOST, NMEA_TCP_PORT, args.window) if NMEA_TCP_HOST else None
-        if samples is None and SIGNALK_URL:
-            samples = sample_signalk(SIGNALK_URL, args.window)
-        point = aggregate(samples)
-        if point:
-            log("point: " + json.dumps(point, ensure_ascii=False))
-        elif samples is None:
-            log("aucune source de données joignable — pas de point ce passage")
-        else:
-            log("aucune position GPS reçue (instruments éteints ?) — pas de point")
+        try:
+            point = collect_point(args.window)
+        except Exception as exc:  # noqa: BLE001 — un relevé raté ne doit pas bloquer l'envoi de la file
+            log(f"relevé KO, pas de point ce passage : {exc!r}")
 
     if args.dry_run:
         return 0 if point else 1
 
-    db = open_queue()
+    db = open_queue(QUEUE_DB)
     if point:
         enqueue(db, point)
     flush_queue(db)

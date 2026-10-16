@@ -43,6 +43,17 @@ Raymarine (iTC-5, AIS700, EV-1) ── NMEA 2000 ── YDEN-03N ── Ethernet
   est jeté ; la file ne reste jamais bloquée.
 - **Envoi non configuré** (Supabase pas encore déployé) : les points sont tout
   de même collectés et partiront d'un bloc quand `TRACKER_TOKEN` sera renseigné.
+- **Capteur absent** (pilote / EV-1 éteint, iTC-5 éteint) : le point part sans
+  le champ concerné. Seule la position est indispensable.
+- **Passerelle qui décroche en cours d'écoute** : ce qui a été reçu est gardé,
+  reconnexion jusqu'à la fin de la fenêtre. Plusieurs adresses possibles
+  (`NMEA_TCP_HOST=IP,yden.local`), essayées dans l'ordre.
+- **Données corrompues** (`nan`, `inf`, checksum faux, phrase tronquée) :
+  ignorées une par une, sans perdre la fenêtre.
+- **Base SQLite corrompue** (coupure de courant) : mise de côté
+  (`queue.db.corrompu-…`) et recréée au passage suivant.
+- **Relevé qui plante** : la file est quand même envoyée, et le timer relance
+  un passage 30 min plus tard quoi qu'il arrive.
 
 ## Fichiers
 
@@ -131,8 +142,9 @@ partition `bootfs` de la carte et lancer `bash /boot/firmware/pfp-tracker-main/i
 
 `install.sh` installe les paquets, copie les fichiers dans `~/pfp-tracker/`,
 crée `config.env`, pose les unités systemd, active le timer et met le Pi en UTC.
-Si `yden.local` ne se résout pas, mettre l'IP fixe de la passerelle dans
-`~/pfp-tracker/config.env` (`NMEA_TCP_HOST=192.168.10.20`).
+Une fois le bail statique posé sur le RUTM10, mettre l'IP fixe de la
+passerelle en premier dans `~/pfp-tracker/config.env`, en gardant `yden.local`
+en secours : `NMEA_TCP_HOST=192.168.10.20,yden.local`.
 
 ### 5. Supabase (plus tard, depuis un poste connecté)
 
