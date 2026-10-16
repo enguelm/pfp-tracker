@@ -51,6 +51,10 @@ QUEUE_MAX_ROWS = 5000  # ~100 jours de coupure à un point / 30 min
 BATCH_SIZE = 100
 HTTP_TIMEOUT_S = 30
 MIN_COG_SOG_KN = 0.5  # en dessous, le cap fond est du bruit
+# Sans cap compas (pilote éteint : l'EV-1 ne publie plus rien), la passerelle
+# oriente le vent vrai avec le cap fond : à l'arrêt (mouillage, ponton) la
+# direction obtenue est aléatoire et n'est pas publiée.
+MIN_TWD_SOG_KN = 2.0
 
 MS_TO_KN = 1.94384
 KMH_TO_KN = 0.539957
@@ -75,8 +79,14 @@ class Samples:
         self.twd: List[float] = []
         self.twa: List[float] = []  # angle vent vrai / étrave, si pas de TWD
         self.mwv_tws: List[float] = []  # vitesse vent vrai via MWV, secours de MWD
-        self.heading: List[float] = []
+        self.heading: List[float] = []  # cap vrai : HDT ou Signal K
+        self.heading_hdg: List[float] = []  # cap vrai via HDG + déclinaison, secours de HDT
+        self.compass = False  # cap compas reçu (HDT/HDG/HDM), même sans déclinaison
         self.sentences = 0  # phrases NMEA valides reçues (diagnostic)
+        self.rmc_seen = False  # RMC prioritaire sur GLL/VTG
+
+    def true_heading(self) -> List[float]:
+        return self.heading or self.heading_hdg
 
     def has_fix(self) -> bool:
         return self.lat is not None and self.lon is not None
@@ -166,8 +176,19 @@ def feed_nmea(samples: Samples, fields: List[str]) -> None:
     if kind == "RMC" and f[2] == "A":  # A = fix valide, V = invalide
         lat, lon = nmea_coord(f[3], f[4]), nmea_coord(f[5], f[6])
         if lat is not None and lon is not None:
+            samples.rmc_seen = True
             samples.set_fix(lat, lon, nmea_datetime(f[9], f[1]))
             samples.add_motion(nmea_float(f[7]), nmea_float(f[8]))
+
+    # Secours si le GPS du bus n'émet pas la PGN 129029 : la passerelle ne
+    # produit alors pas de RMC, seulement GLL (position, sans date) et VTG.
+    elif kind == "GLL" and f[6] == "A" and not samples.rmc_seen:
+        lat, lon = nmea_coord(f[1], f[2]), nmea_coord(f[3], f[4])
+        if lat is not None and lon is not None:
+            samples.set_fix(lat, lon, None)
+
+    elif kind == "VTG" and f[9] != "N" and not samples.rmc_seen:
+        samples.add_motion(nmea_float(f[5]), nmea_float(f[1]))
 
     elif kind == "MWD":  # vent vrai calculé par la passerelle
         tws = nmea_float(f[5])  # nœuds
@@ -186,13 +207,19 @@ def feed_nmea(samples: Samples, fields: List[str]) -> None:
             samples.mwv_tws.append(speed)  # MWD reste prioritaire (cf. aggregate)
 
     elif kind == "HDT":
-        samples.add_heading(nmea_float(f[1]))
+        heading = nmea_float(f[1])
+        samples.compass |= heading is not None
+        samples.add_heading(heading)
 
-    elif kind == "HDG" and not samples.heading:  # cap magnétique + variation → cap vrai
+    elif kind == "HDG":  # cap magnétique + déclinaison → cap vrai
         heading = nmea_float(f[1])
         variation = nmea_float(f[4])
+        samples.compass |= heading is not None
         if heading is not None and variation is not None:
-            samples.add_heading(heading + (variation if f[5] == "E" else -variation))
+            samples.heading_hdg.append((heading + (variation if f[5] == "E" else -variation)) % 360)
+
+    elif kind == "HDM":  # cap magnétique seul : prouve la présence du compas
+        samples.compass |= nmea_float(f[1]) is not None
 
 
 def sample_nmea(host: str, port: int, window_s: float) -> Optional[Samples]:
@@ -368,16 +395,17 @@ def aggregate(samples: Optional[Samples]) -> Optional[dict]:
         point["sog_kn"] = round(statistics.median(samples.sog), 1)
     if samples.cog:
         point["cog_deg"] = round_angle(circular_mean_deg(samples.cog))
-    if samples.heading:
-        point["heading_deg"] = round_angle(circular_mean_deg(samples.heading))
+    heading = samples.true_heading()
+    if heading:
+        point["heading_deg"] = round_angle(circular_mean_deg(heading))
 
     tws = samples.tws or samples.mwv_tws
     if tws:
         point["tws_kn"] = round(statistics.median(tws), 1)
-    if samples.twd:
+    if samples.twd and (heading or samples.compass or point.get("sog_kn", 0) >= MIN_TWD_SOG_KN):
         point["twd_deg"] = round_angle(circular_mean_deg(samples.twd))
-    elif samples.twa and samples.heading:  # MWV vrai + cap → direction
-        point["twd_deg"] = round_angle(circular_mean_deg(samples.heading) + circular_mean_deg(samples.twa))
+    elif samples.twa and heading:  # MWV vrai + cap → direction
+        point["twd_deg"] = round_angle(circular_mean_deg(heading) + circular_mean_deg(samples.twa))
     return point
 
 

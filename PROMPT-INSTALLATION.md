@@ -13,7 +13,8 @@ sauf bug avéré, et dans ce cas explique-moi le correctif avant.
 
 Matériel et réseau, déjà en place :
 - Bus NMEA 2000 Raymarine : iTC-5 (vent, loch, sondeur), AIS700 qui fournit la
-  position GPS, la vitesse et le cap fond. Pas de compas sur le bus.
+  position GPS, la vitesse et le cap fond. Compas : EV-1 du pilote Raymarine
+  Evolution (cap magnétique, publié seulement quand le pilote est sous tension).
 - Passerelle Yacht Devices YDEN-03N branchée en Ethernet sur le routeur
   Teltonika RUTM10. Réglages usine : flux NMEA 0183 sur TCP 1456, interface web
   http://yden.local, mot de passe admin.

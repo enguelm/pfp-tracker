@@ -23,10 +23,22 @@ if [[ -n "$GW_IP" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_POR
   ok "port TCP $NMEA_TCP_PORT ouvert sur la passerelle"
   info "5 premières phrases NMEA :"
   timeout 8 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_PORT; head -n 5 <&3" 2>/dev/null | sed 's/^/         /' || info "(rien reçu : instruments éteints ou serveur n°1 désactivé)"
+  # Types de phrases sur 15 s : la position exige RMC (PGN 129029 sur le bus) ou, à défaut, GLL.
+  TYPES="$(timeout 15 bash -c "exec 3<>/dev/tcp/$GW_IP/$NMEA_TCP_PORT; cat <&3" 2>/dev/null | cut -c4-6 | sort | uniq -c | sort -rn | awk '{printf "%s:%s ", $2, $1}')"
+  info "phrases reçues en 15 s : ${TYPES:-aucune}"
+  if [[ "$TYPES" == *"RMC:"* ]]; then ok "position GPS avec date (RMC)"
+  elif [[ "$TYPES" == *"GLL:"* ]]; then info "pas de RMC mais GLL : position sans date GPS, l'heure NTP du Pi sera utilisée"
+  else ko "aucune position (ni RMC ni GLL) : GPS de l'AIS700 non diffusé sur le bus ?"; fi
+  if [[ "$TYPES" == *"MWD:"* || "$TYPES" == *"MWV:"* ]]; then ok "vent reçu (MWD/MWV)"; else info "pas de vent (iTC-5 éteint ?)"; fi
+  # Cap : compas EV-1 du pilote. Le cap vrai (HDT, ou HDG avec déclinaison) exige une déclinaison sur le bus.
+  if [[ "$TYPES" == *"HDT:"* ]]; then ok "cap vrai reçu (HDT)"
+  elif [[ "$TYPES" == *"HDG:"* || "$TYPES" == *"HDM:"* ]]; then info "cap compas reçu (HDG/HDM) : heading_deg n'apparaît dans --sample que si la déclinaison est sur le bus"
+  else info "pas de cap (pilote / EV-1 éteint ?) : direction du vent publiée seulement au-delà de 2 nœuds"; fi
 else
   ko "port TCP $NMEA_TCP_PORT fermé ou passerelle hors ligne"
 fi
-if curl -fsS -m 8 -o /dev/null https://uiblqthfbysfxjalwdzw.supabase.co/ 2>/dev/null; then ok "Internet (Starlink) joignable"; else ko "pas d'Internet (Starlink éteint ? WAN du RUTM10 ?) — les points s'accumuleront dans la file"; fi
+# Sans -f : n'importe quelle réponse HTTP prouve l'accès Internet (la racine Supabase répond 404).
+if curl -sS -m 8 -o /dev/null https://uiblqthfbysfxjalwdzw.supabase.co/ 2>/dev/null; then ok "Internet (Starlink) joignable"; else ko "pas d'Internet (Starlink éteint ? WAN du RUTM10 ?) — les points s'accumuleront dans la file"; fi
 
 echo "== Heure"
 if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]]; then ok "horloge synchronisée NTP : $(date -u +%FT%TZ)"; else ko "horloge NON synchronisée ($(date -u +%FT%TZ)) — l'heure GPS de la passerelle sera utilisée"; fi

@@ -9,19 +9,23 @@ bateau au port de Papeete avec les données nav en tirets.
 ## Architecture du bord
 
 ```
-Raymarine (iTC-5, GPS, …) ── NMEA 2000 ── YDEN-03N ── Ethernet ──┐
-                                                                  │
-                                 Starlink ── WAN ── RUTM10 (LAN + WiFi du bord)
-                                                      │        │
-                                              Raspberry Pi    PC / téléphones
-                                              (Ethernet)
+Raymarine (iTC-5, AIS700, EV-1) ── NMEA 2000 ── YDEN-03N ── Ethernet ──┐
+                                                                       │
+                                      Starlink ── WAN ── RUTM10 (LAN + WiFi du bord)
+                                                           │        │
+                                                   Raspberry Pi    PC / téléphones
+                                                   (Ethernet)
 ```
 
 - **YDEN-03N** (Yacht Devices) : passerelle NMEA 2000 → Ethernet. En réglage
   usine elle émet un flux **NMEA 0183 sur TCP, port 1456** (serveur n°1), avec
   position, vitesse et cap fond, heure GPS (RMC) et **vent vrai calculé par la
-  passerelle** (MWD) à partir du vent apparent et de SOG/cap. Interface web :
-  `http://yden.local`, mot de passe `admin`. En DHCP par défaut.
+  passerelle** (MWD) à partir du vent apparent et de SOG/cap. Le cap vient du
+  compas **EV-1** du pilote (PGN 127250, magnétique) : la passerelle n'en tire
+  un cap vrai (HDT, ou HDG avec déclinaison) que si une déclinaison magnétique
+  circule sur le bus (traceur Raymarine en général). Pilote éteint = pas de cap :
+  la direction du vent n'est alors publiée qu'au-delà de 2 nœuds. Interface
+  web : `http://yden.local`, mot de passe `admin`. En DHCP par défaut.
 - **RUTM10** (Teltonika) : routeur du bord. Starlink sur le port WAN, tout le
   reste sur le LAN. LAN usine `192.168.1.1/24` — **à changer** (ex.
   `192.168.10.1/24`) car le routeur Starlink utilise le même sous-réseau.
@@ -93,11 +97,18 @@ Pour publier une mise à jour depuis le repo du site :
    A06078) ; sur un backbone NMEA 2000 standard, un simple câble de spur.
 2. Alimenter le bus : la LED jaune du port Ethernet doit clignoter
    irrégulièrement.
-3. Depuis le PC : `http://yden.local` (ou son IP). Rien à régler pour le
-   tracker : le serveur n°1 usine (TCP 1456, NMEA 0183) suffit.
+3. Depuis le PC : `http://yden.local` (ou son IP). Le serveur n°1 usine
+   (TCP 1456, NMEA 0183) suffit au tracker, mais **passer le mode réseau de
+   « DHCP Magic » (usine) à « DHCP Client »** : en DHCP Magic, si la passerelle
+   démarre avant le RUTM10 (cas typique à la remise sous tension du bord), elle
+   devient serveur DHCP en `192.168.4.1` et n'est plus joignable à son adresse
+   habituelle. Le serveur n°1 accepte au plus 3 connexions TCP simultanées :
+   brancher les autres applications (OpenCPN, tablette) en UDP ou sur un autre
+   serveur pour laisser une place au Pi.
 4. Test : avec les instruments allumés, le PC doit voir des phrases
    `$YDRMC`, `$YDMWD` sur le port 1456 (`nc yden.local 1456` ou PuTTY en mode
-   raw).
+   raw). Sans `$YDRMC` (GPS qui n'émet pas la PGN 129029), le tracker se
+   rabat sur `$YDGLL` / `$YDVTG` et date le point avec l'heure NTP du Pi.
 
 ### 3. Carte SD
 
@@ -143,7 +154,7 @@ Test à blanc de la fonction, sans bateau :
 curl -i -X POST "https://uiblqthfbysfxjalwdzw.supabase.co/functions/v1/ingest-position" \
   -H "content-type: application/json" -H "x-tracker-token: $TRACKER_TOKEN" \
   -d '{"points":[{"ts":"2026-11-15T12:00:00Z","lat":-17.535,"lon":-149.5677,"sog_kn":6.4,"cog_deg":312,"tws_kn":14.2,"twd_deg":85}]}'
-# Attendu : 200 {"received":1,"inserted":1,"rejected":0} — puis nettoyer la table.
+# Attendu : 200 {"received":1,"inserted":1} — puis nettoyer la table.
 ```
 
 ## Exploitation
@@ -162,8 +173,8 @@ une carte de rechange à bord.
 ## Signal K (optionnel)
 
 ```bash
-bash /boot/firmware/tracker/install-signalk.sh 192.168.10.20          # NMEA 2000 RAW (port 1457 à activer sur le YDEN)
-bash /boot/firmware/tracker/install-signalk.sh 192.168.10.20 nmea0183 # ou flux usine 1456, sans réglage YDEN
+bash ~/pfp-tracker-main/install-signalk.sh 192.168.10.20          # NMEA 2000 RAW (port 1457 à activer sur le YDEN)
+bash ~/pfp-tracker-main/install-signalk.sh 192.168.10.20 nmea0183 # ou flux usine 1456, sans réglage YDEN
 ```
 
 Interface sur `http://pfp-pi.local:3000`. Pour en faire la source de secours du
