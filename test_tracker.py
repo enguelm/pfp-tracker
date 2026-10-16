@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(__file__))
 import tracker  # noqa: E402
@@ -335,6 +336,44 @@ class Robustness(unittest.TestCase):
         finally:
             gw.close()
         self.assertTrue(samples.has_fix())
+
+    def test_only_400_422_reject_points(self):
+        statuses = iter([404, 405, 429, 500, 503, 401, 400, 422])
+        expected = ["retry", "retry", "retry", "retry", "retry", "auth", "rejected", "rejected"]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["content-length"]))
+                self.send_response(next(statuses))
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        saved = tracker.SUPABASE_FUNCTION_URL
+        tracker.SUPABASE_FUNCTION_URL = f"http://127.0.0.1:{srv.server_address[1]}/"
+        try:
+            got = [tracker.send_batch([{"ts": "2026-11-15T00:00:00Z", "lat": -17.5, "lon": -149.5}])
+                   for _ in expected]
+        finally:
+            tracker.SUPABASE_FUNCTION_URL = saved
+            srv.shutdown()
+        self.assertEqual(got, expected)
+
+    def test_function_not_deployed_keeps_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = tracker.open_queue(os.path.join(tmp, "q.db"))
+            tracker.enqueue(db, {"ts": "2026-11-15T00:00:00Z", "lat": -17.5, "lon": -149.5})
+            saved = (tracker.send_batch, tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN)
+            tracker.send_batch = lambda points: "retry"  # ce que renvoie désormais un 404
+            tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN = "http://x", "t"
+            try:
+                tracker.flush_queue(db)
+            finally:
+                tracker.send_batch, tracker.SUPABASE_FUNCTION_URL, tracker.TRACKER_TOKEN = saved
+            self.assertEqual(tracker.queue_size(db), 1)
 
     def test_corrupted_queue_is_set_aside(self):
         with tempfile.TemporaryDirectory() as tmp:

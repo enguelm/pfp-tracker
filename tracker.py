@@ -490,7 +490,10 @@ def queue_size(db: sqlite3.Connection) -> int:
 # --- Envoi ------------------------------------------------------------------
 
 def send_batch(points: List[dict]) -> str:
-    """'ok' | 'rejected' (4xx payload) | 'auth' (401/403) | 'retry' (réseau, 5xx)."""
+    """'ok' | 'rejected' (400/422 : point invalide) | 'auth' (401/403) | 'retry' (tout le reste).
+
+    Seul un refus explicite du contenu peut faire jeter un point : un 404
+    (fonction pas encore déployée, URL fausse), un 429 ou un 5xx garde la file."""
     req = urllib.request.Request(
         SUPABASE_FUNCTION_URL,
         data=json.dumps({"points": points}).encode(),
@@ -503,10 +506,10 @@ def send_batch(points: List[dict]) -> str:
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             return "auth"
-        if 400 <= exc.code < 500:
+        if exc.code in (400, 422):
             log(f"envoi refusé HTTP {exc.code}: {exc.read(200)!r}")
             return "rejected"
-        log(f"envoi KO HTTP {exc.code}")
+        log(f"envoi KO HTTP {exc.code} (file conservée) : {exc.read(200)!r}")
         return "retry"
     except Exception as exc:  # noqa: BLE001
         log(f"envoi KO: {exc}")
