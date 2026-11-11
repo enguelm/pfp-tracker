@@ -1,9 +1,9 @@
 [Unit]
-Description=Lance le PFP tracker toutes les 30 minutes
+Description=Lance le PFP tracker toutes les heures
 
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=30min
+OnUnitActiveSec=60min
 RandomizedDelaySec=30
 Persistent=true
 
