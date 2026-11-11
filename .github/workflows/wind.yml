@@ -1,0 +1,51 @@
+# Vent GFS pour la carte du direct (pacific-firebelt) — toutes les 6 h.
+#
+# Ce fichier vit dans tracker/ du repo du site et arrive à la racine du repo
+# public pfp-tracker par `git subtree push` : c'est là qu'il tourne.
+# Le résultat (wind.png + wind.json) est publié sur la branche orpheline
+# `wind-data`, réécrite à chaque fois (pas d'historique qui gonfle) et lue par
+# le site via raw.githubusercontent.com. Aucun déploiement Netlify n'est déclenché.
+
+name: wind
+
+on:
+  schedule:
+    # Les runs GFS 00/06/12/18 UTC sortent ~4 h après : on passe à H+4h40.
+    - cron: "40 4,10,16,22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wind
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: pip install --quiet eccodes numpy pillow
+
+      - name: GFS → PNG
+        run: python wind/build_wind.py out
+
+      - name: Publier sur la branche wind-data
+        working-directory: out
+        run: |
+          git init --quiet --initial-branch=wind-data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wind.png wind.json
+          git commit --quiet -m "Vent GFS $(jq -r .valid wind.json)"
+          git push --force --quiet \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            wind-data
